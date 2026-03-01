@@ -422,6 +422,88 @@ async def test_upload_video_cam2(file: UploadFile = File(..., description="Video
     return {"ok": True, "path": str(path), "format": ext}
 
 
+ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".jpe", ".webp"}
+SCREENSHOTS_DIR = Path(__file__).parent.parent / "slides" / "screenshots"
+# Filename (without ext) → scenario ID. e.g. drowsy.png → drowsy, warning.jpg → drowsy
+SCENARIO_FILE_ALIASES: dict[str, str] = {
+    "drowsy": "drowsy",
+    "warning": "drowsy",
+    "fatigue": "fatigue_onset",
+    "critical": "critical",
+    "microsleep": "micro_sleep",
+    "landing": "landing_bounce",
+    "landing_bounce": "landing_bounce",
+    "cockpit": "cockpit_errors",
+    "cockpit_errors": "cockpit_errors",
+    "nominal": "nominal",
+}
+
+
+def _scenario_from_filename(name: str) -> str | None:
+    """Map filename (without ext) to scenario ID."""
+    key = name.lower().strip().replace("-", "_").replace(" ", "_")
+    if key in TEST_SCENARIOS:
+        return key
+    return SCENARIO_FILE_ALIASES.get(key)
+
+
+@app.post("/test/upload-scenario-image")
+async def test_upload_scenario_image(file: UploadFile = File(..., description="Image file: drowsy.png, critical.jpg, etc.")) -> dict[str, Any]:
+    """
+    Upload an image; filename determines which scenario to inject.
+    e.g. drowsy.png → inject drowsy (WARNING), critical.jpg → inject critical.
+    Saves to slides/screenshots/{scenario}.png for use in PPT.
+    """
+    ext = (Path(file.filename or "").suffix or "").lower()
+    if ext not in ALLOWED_IMAGE_EXT:
+        raise HTTPException(status_code=400, detail="Use PNG, JPEG/JPG, or WebP. Filename = scenario: drowsy.png, critical.jpg, landing.jpeg, cockpit.webp")
+    stem = Path(file.filename or "unknown").stem
+    scenario = _scenario_from_filename(stem)
+    if not scenario or scenario not in TEST_SCENARIOS:
+        valid = list(SCENARIO_FILE_ALIASES.keys())[:12]
+        raise HTTPException(status_code=400, detail=f"Unknown scenario '{stem}'. Use filename like: drowsy.png, critical.jpg, nominal.png, landing.png, cockpit.jpg. Valid: {valid}")
+    content = await file.read()
+    if len(content) > 10 * 1024 * 1024:
+        raise HTTPException(status_code=400, detail="Image too large. Max 10MB.")
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    dest = SCREENSHOTS_DIR / f"{scenario}{ext}"
+    dest.write_bytes(content)
+    result = _apply_test_scenario(scenario)
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error", "Bad request"))
+    return {"ok": True, "scenario": scenario, "path": str(dest), "state": result.get("state")}
+
+
+@app.get("/test/scenario-images")
+def test_list_scenario_images() -> dict[str, list[str]]:
+    """List uploaded scenario images in slides/screenshots (drowsy.png, critical.jpg, etc.)."""
+    SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
+    images: list[str] = []
+    for p in SCREENSHOTS_DIR.iterdir():
+        if p.is_file() and p.suffix.lower() in ALLOWED_IMAGE_EXT:
+            stem = p.stem
+            if stem.endswith("_ui"):
+                continue
+            scenario = stem if stem in TEST_SCENARIOS else _scenario_from_filename(stem)
+            if scenario and scenario in TEST_SCENARIOS:
+                images.append(p.name)
+    return {"images": sorted(set(images))}
+
+
+@app.delete("/test/scenario-image")
+def test_remove_scenario_image(scenario: str = Query(..., description="Scenario name to remove image for")) -> dict[str, Any]:
+    """Remove uploaded scenario image from slides/screenshots."""
+    if scenario not in TEST_SCENARIOS:
+        raise HTTPException(status_code=400, detail=f"Unknown scenario. Use: {list(TEST_SCENARIOS.keys())[:10]}...")
+    removed = []
+    for ext in ALLOWED_IMAGE_EXT:
+        p = SCREENSHOTS_DIR / f"{scenario}{ext}"
+        if p.exists():
+            p.unlink()
+            removed.append(p.name)
+    return {"ok": True, "removed": removed}
+
+
 @app.post("/test/clear-video-cam2")
 def test_clear_video_cam2() -> dict[str, str]:
     """Switch back to live camera for external/landing source."""

@@ -11,6 +11,7 @@ import { AlertBanner } from './components/AlertBanner';
 import { PSITimeline } from './components/PSITimeline';
 import { VideoPanel } from './components/VideoPanel';
 import { SimulatorPanel } from './components/SimulatorPanel';
+import { ScenarioImagePanel } from './components/ScenarioImagePanel';
 
 function App() {
   const { data, connected, error } = useWSFeed();
@@ -71,6 +72,7 @@ function App() {
 
       <VideoPanel />
       <SimulatorPanel />
+      <ScenarioImagePanel />
     </div>
   );
 }
