@@ -9,6 +9,7 @@ import { AgentFeed } from './components/AgentFeed';
 import { ErrorLog } from './components/ErrorLog';
 import { AlertBanner } from './components/AlertBanner';
 import { PSITimeline } from './components/PSITimeline';
+import { VideoPanel } from './components/VideoPanel';
 import { SimulatorPanel } from './components/SimulatorPanel';
 
 function App() {
@@ -68,6 +69,7 @@ function App() {
         </div>
       </div>
 
+      <VideoPanel />
       <SimulatorPanel />
     </div>
   );

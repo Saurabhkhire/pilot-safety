@@ -10,7 +10,10 @@ import time
 from contextlib import asynccontextmanager
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, Query, WebSocket, WebSocketDisconnect
+import tempfile
+from pathlib import Path
+
+from fastapi import FastAPI, File, HTTPException, Query, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import config
@@ -138,6 +141,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="EngageIQ Flight Deck", version="0.1.0", lifespan=lifespan)
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -182,97 +186,153 @@ def state() -> dict[str, Any]:
 # ---------------------------------------------------------------------------
 
 TEST_SCENARIOS: dict[str, dict[str, Any]] = {
+    # --- NOMINAL ---
     "nominal": {
-        "pilot_state": {
-            "state": "ALERT",
-            "perclos_est": 2.0,
-            "yawn": False,
-            "head_drop": False,
-            "gaze_off_instruments": False,
-            "confidence": 0.95,
-            "reason": "Pilot alert, eyes on instruments",
-        },
+        "pilot_state": {"state": "ALERT", "perclos_est": 2.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.95, "reason": "Pilot alert, eyes on instruments"},
         "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 2.0, "critical_events_1h": 0},
-        "phase": "cruise",
-        "cockpit_errors": [],
-        "landing": None,
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": [],
     },
+    # --- WARNING (fatigue onset, gaze, yawn) ---
     "drowsy": {
-        "pilot_state": {
-            "state": "DROWSY",
-            "perclos_est": 18.0,
-            "yawn": True,
-            "head_drop": False,
-            "gaze_off_instruments": True,
-            "confidence": 0.88,
-            "reason": "Elevated perclos, gaze drifting right",
-        },
+        "pilot_state": {"state": "DROWSY", "perclos_est": 18.0, "yawn": True, "head_drop": False, "gaze_off_instruments": True, "confidence": 0.88, "reason": "Elevated perclos, gaze drifting right"},
         "signals": {"yawn_count_10m": 3, "head_drop_count_30m": 1, "gaze_off_pct": 18.0, "critical_events_1h": 0},
-        "phase": "cruise",
-        "cockpit_errors": [],
-        "landing": None,
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Drowsiness detected")', "suggest_rest_protocol(15)"],
     },
+    "fatigue_onset": {
+        "pilot_state": {"state": "FATIGUED", "perclos_est": 12.0, "yawn": False, "head_drop": False, "gaze_off_instruments": True, "confidence": 0.85, "reason": "Fatigue onset, perclos rising"},
+        "signals": {"yawn_count_10m": 1, "head_drop_count_30m": 0, "gaze_off_pct": 15.0, "critical_events_1h": 0},
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ["log_fatigue_event(perclos_elevated, severity=2)", 'trigger_alert(WARNING, "Fatigue onset")'],
+    },
+    "gaze_drift": {
+        "pilot_state": {"state": "FATIGUED", "perclos_est": 8.0, "yawn": False, "head_drop": False, "gaze_off_instruments": True, "confidence": 0.9, "reason": "Gaze drifting left of instruments"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 1, "gaze_off_pct": 22.0, "critical_events_1h": 0},
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Gaze deviation detected")'],
+    },
+    "yawn_series": {
+        "pilot_state": {"state": "DROWSY", "perclos_est": 14.0, "yawn": True, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.87, "reason": "Repeated yawning in cruise"},
+        "signals": {"yawn_count_10m": 4, "head_drop_count_30m": 0, "gaze_off_pct": 8.0, "critical_events_1h": 0},
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Yawn frequency elevated")', "suggest_rest_protocol(20)"],
+    },
+    # --- CRITICAL (micro-sleep, head drop, extreme fatigue) ---
     "critical": {
-        "pilot_state": {
-            "state": "CRITICAL",
-            "perclos_est": 32.0,
-            "yawn": True,
-            "head_drop": True,
-            "gaze_off_instruments": True,
-            "confidence": 0.9,
-            "reason": "Micro-sleep risk, head drop detected",
-        },
+        "pilot_state": {"state": "CRITICAL", "perclos_est": 32.0, "yawn": True, "head_drop": True, "gaze_off_instruments": True, "confidence": 0.9, "reason": "Micro-sleep risk, head drop detected"},
         "signals": {"yawn_count_10m": 5, "head_drop_count_30m": 4, "gaze_off_pct": 35.0, "critical_events_1h": 2},
-        "phase": "cruise",
-        "cockpit_errors": [],
-        "landing": None,
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(CRITICAL, "Pilot fatigue critical")', "notify_copilot(reason='Critical fatigue')"],
+    },
+    "micro_sleep": {
+        "pilot_state": {"state": "CRITICAL", "perclos_est": 40.0, "yawn": True, "head_drop": True, "gaze_off_instruments": True, "confidence": 0.92, "reason": "Eyes closed >3s, head drop"},
+        "signals": {"yawn_count_10m": 6, "head_drop_count_30m": 5, "gaze_off_pct": 50.0, "critical_events_1h": 3},
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(CRITICAL, "Micro-sleep detected")', "notify_copilot(reason='Micro-sleep')", "request_atc_advisory(reason='Pilot incapacitation risk')"],
+    },
+    "head_drop_severe": {
+        "pilot_state": {"state": "CRITICAL", "perclos_est": 28.0, "yawn": False, "head_drop": True, "gaze_off_instruments": True, "confidence": 0.88, "reason": "Severe head drop, eyelids drooping"},
+        "signals": {"yawn_count_10m": 2, "head_drop_count_30m": 5, "gaze_off_pct": 40.0, "critical_events_1h": 1},
+        "phase": "cruise", "cockpit_errors": [], "landing": None,
+        "agent_actions": ['trigger_alert(CRITICAL, "Head drop severe")', "notify_copilot(reason='Head drop')"],
+    },
+    # --- TAKEOFF / LANDING ---
+    "takeoff_smooth": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 1.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.95, "reason": "On takeoff"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
+        "phase": "takeoff", "cockpit_errors": [], "landing": None,
+        "agent_actions": [],
+    },
+    "approach_nominal": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 3.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.92, "reason": "Stable approach"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 5.0, "critical_events_1h": 0},
+        "phase": "approach", "cockpit_errors": [], "landing": None,
+        "agent_actions": [],
     },
     "landing_bounce": {
-        "pilot_state": {
-            "state": "ALERT",
-            "perclos_est": 1.0,
-            "yawn": False,
-            "head_drop": False,
-            "gaze_off_instruments": False,
-            "confidence": 0.9,
-            "reason": "On approach",
-        },
+        "pilot_state": {"state": "ALERT", "perclos_est": 1.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.9, "reason": "On approach"},
         "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
-        "phase": "landing",
-        "cockpit_errors": [],
-        "landing": {
-            "score": 10,
-            "bounce_count": 4,
-            "contact_type": "bounce",
-            "on_centerline": True,
-            "events": [
-                {"t_ms": 0, "type": "contact"},
-                {"t_ms": 900, "type": "bounce"},
-                {"t_ms": 2100, "type": "bounce"},
-                {"t_ms": 3400, "type": "bounce"},
-                {"t_ms": 4500, "type": "final_contact"},
-            ],
-        },
+        "phase": "landing", "cockpit_errors": [],
+        "landing": {"score": 10, "bounce_count": 4, "contact_type": "bounce", "on_centerline": True, "events": [{"t_ms": 0, "type": "contact"}, {"t_ms": 900, "type": "bounce"}, {"t_ms": 2100, "type": "bounce"}, {"t_ms": 3400, "type": "bounce"}, {"t_ms": 4500, "type": "final_contact"}]},
+        "agent_actions": ["log_fatigue_event(landing_hard, severity=3)"],
     },
-    "cockpit_errors": {
-        "pilot_state": {
-            "state": "ALERT",
-            "perclos_est": 3.0,
-            "yawn": False,
-            "head_drop": False,
-            "gaze_off_instruments": False,
-            "confidence": 0.9,
-            "reason": "Nominal",
-        },
+    "landing_hard": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 2.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.9, "reason": "Touchdown"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
+        "phase": "landing", "cockpit_errors": [],
+        "landing": {"score": 60, "bounce_count": 1, "contact_type": "hard", "on_centerline": True, "events": [{"t_ms": 0, "type": "contact"}]},
+        "agent_actions": [],
+    },
+    "landing_greaser": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 1.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.95, "reason": "Smooth touchdown"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
+        "phase": "landing", "cockpit_errors": [],
+        "landing": {"score": 100, "bounce_count": 0, "contact_type": "greaser", "on_centerline": True, "events": [{"t_ms": 0, "type": "contact"}]},
+        "agent_actions": [],
+    },
+    "go_around": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 4.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.88, "reason": "Go-around initiated"},
         "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 5.0, "critical_events_1h": 0},
-        "phase": "approach",
-        "cockpit_errors": [
+        "phase": "approach", "cockpit_errors": [], "landing": None,
+        "agent_actions": [],
+    },
+    # --- COCKPIT ERRORS ---
+    "cockpit_errors": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 3.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.9, "reason": "Nominal"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 5.0, "critical_events_1h": 0},
+        "phase": "approach", "cockpit_errors": [
             {"ts": time.time() - 120, "type": "omission", "description": "Gear not down by 1000 ft AGL", "severity": 2, "points_deducted": 8},
             {"ts": time.time() - 60, "type": "sequence_error", "description": "Checklist out of order", "severity": 1, "points_deducted": 2},
-        ],
-        "landing": None,
+        ], "landing": None,
+        "agent_actions": [],
+    },
+    "cockpit_gear_omission": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 2.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.9, "reason": "Nominal"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 2.0, "critical_events_1h": 0},
+        "phase": "approach", "cockpit_errors": [
+            {"ts": time.time() - 90, "type": "omission", "description": "Landing gear not extended by 1000 ft AGL", "severity": 2, "points_deducted": 8},
+        ], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Gear omission")'],
+    },
+    "cockpit_wrong_button": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 1.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.92, "reason": "Nominal"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
+        "phase": "climb", "cockpit_errors": [
+            {"ts": time.time() - 60, "type": "wrong_button", "description": "Selected wrong flap setting", "severity": 3, "points_deducted": 20},
+        ], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Wrong control selected")'],
+    },
+    "cockpit_reversal": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 2.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.88, "reason": "Nominal"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 3.0, "critical_events_1h": 0},
+        "phase": "approach", "cockpit_errors": [
+            {"ts": time.time() - 45, "type": "reversal", "description": "Throttle moved opposite to intended", "severity": 3, "points_deducted": 20},
+        ], "landing": None,
+        "agent_actions": ['trigger_alert(CRITICAL, "Control reversal")'],
+    },
+    "cockpit_sequence": {
+        "pilot_state": {"state": "ALERT", "perclos_est": 1.0, "yawn": False, "head_drop": False, "gaze_off_instruments": False, "confidence": 0.9, "reason": "Nominal"},
+        "signals": {"yawn_count_10m": 0, "head_drop_count_30m": 0, "gaze_off_pct": 0, "critical_events_1h": 0},
+        "phase": "pre_takeoff", "cockpit_errors": [
+            {"ts": time.time() - 30, "type": "sequence_error", "description": "Before-takeoff checklist out of order", "severity": 1, "points_deducted": 2},
+            {"ts": time.time() - 15, "type": "sequence_error", "description": "Lights activated before transponder", "severity": 1, "points_deducted": 2},
+        ], "landing": None,
+        "agent_actions": [],
+    },
+    "cockpit_multi": {
+        "pilot_state": {"state": "FATIGUED", "perclos_est": 10.0, "yawn": True, "head_drop": False, "gaze_off_instruments": True, "confidence": 0.85, "reason": "Fatigue + procedural errors"},
+        "signals": {"yawn_count_10m": 2, "head_drop_count_30m": 1, "gaze_off_pct": 12.0, "critical_events_1h": 0},
+        "phase": "approach", "cockpit_errors": [
+            {"ts": time.time() - 120, "type": "omission", "description": "Autobrake not set", "severity": 2, "points_deducted": 8},
+            {"ts": time.time() - 60, "type": "commission", "description": "Spoilers armed too early", "severity": 2, "points_deducted": 8},
+        ], "landing": None,
+        "agent_actions": ['trigger_alert(WARNING, "Fatigue and procedural errors")', "suggest_rest_protocol(15)"],
     },
 }
+
+# Log at startup so you can verify backend reloaded (should show 20 scenarios)
+print(f"[EngageIQ] Loaded {len(TEST_SCENARIOS)} test scenarios: {sorted(TEST_SCENARIOS.keys())}")
 
 
 def _apply_test_scenario(scenario: str) -> dict[str, Any]:
@@ -286,15 +346,7 @@ def _apply_test_scenario(scenario: str) -> dict[str, Any]:
     _current_state["phase"] = data["phase"]
     _current_state["cockpit_errors"] = data["cockpit_errors"]
     _current_state["landing"] = data["landing"]
-    _current_state["agent_actions"] = (
-        ['trigger_alert(WARNING, "Drowsiness detected")', "suggest_rest_protocol(15)"]
-        if scenario == "drowsy"
-        else (
-            ['trigger_alert(CRITICAL, "Pilot fatigue critical")', "notify_copilot(reason='Critical fatigue')"]
-            if scenario == "critical"
-            else []
-        )
-    )
+    _current_state["agent_actions"] = data.get("agent_actions", [])
     return {"ok": True, "scenario": scenario, "state": _build_psi_payload()}
 
 
@@ -315,6 +367,67 @@ def test_inject(scenario: str = Query(..., description="Scenario name")) -> dict
 def test_scenarios() -> dict[str, list[str]]:
     """List available test scenario names."""
     return {"scenarios": list(TEST_SCENARIOS.keys())}
+
+
+ALLOWED_VIDEO_EXT = {".mp4", ".avi", ".mov", ".webm", ".mkv"}
+MAX_VIDEO_SIZE_MB = 100
+
+
+@app.post("/test/upload-video")
+async def test_upload_video(file: UploadFile = File(..., description="Video file (MP4, AVI, MOV, WebM)")) -> dict[str, Any]:
+    """
+    Upload a video file to use as face source instead of live camera.
+    Format: MP4, AVI, MOV, WebM, MKV. Max ~100MB.
+    PerceptionAgent will read frames from this video (loops when done).
+    """
+    from cameras.camera_manager import set_video_face_source
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unsupported format. Use: {', '.join(ALLOWED_VIDEO_EXT)}",
+        )
+    content = await file.read()
+    if len(content) > MAX_VIDEO_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File too large. Max {MAX_VIDEO_SIZE_MB}MB.")
+    tmp = tempfile.mkdtemp(prefix="engageiq_video_")
+    path = Path(tmp) / (file.filename or "video")
+    path.write_bytes(content)
+    set_video_face_source(str(path))
+    return {"ok": True, "path": str(path), "format": ext}
+
+
+@app.post("/test/clear-video")
+def test_clear_video() -> dict[str, str]:
+    """Switch back to live camera for face source."""
+    from cameras.camera_manager import set_video_face_source
+    set_video_face_source(None)
+    return {"ok": True, "message": "Face: switched back to camera"}
+
+
+@app.post("/test/upload-video-cam2")
+async def test_upload_video_cam2(file: UploadFile = File(..., description="Video file for landing/takeoff")) -> dict[str, Any]:
+    """Upload video for Camera 2 (external/landing/takeoff). LandingAgent uses this."""
+    from cameras.camera_manager import set_video_external_source
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in ALLOWED_VIDEO_EXT:
+        raise HTTPException(status_code=400, detail=f"Unsupported format. Use: {', '.join(ALLOWED_VIDEO_EXT)}")
+    content = await file.read()
+    if len(content) > MAX_VIDEO_SIZE_MB * 1024 * 1024:
+        raise HTTPException(status_code=400, detail=f"File too large. Max {MAX_VIDEO_SIZE_MB}MB.")
+    tmp = tempfile.mkdtemp(prefix="engageiq_cam2_")
+    path = Path(tmp) / (file.filename or "video_cam2")
+    path.write_bytes(content)
+    set_video_external_source(str(path))
+    return {"ok": True, "path": str(path), "format": ext}
+
+
+@app.post("/test/clear-video-cam2")
+def test_clear_video_cam2() -> dict[str, str]:
+    """Switch back to live camera for external/landing source."""
+    from cameras.camera_manager import set_video_external_source
+    set_video_external_source(None)
+    return {"ok": True, "message": "Cam2: switched back to camera"}
 
 
 def update_phase(phase: str) -> None:

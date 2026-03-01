@@ -73,7 +73,17 @@ curl http://localhost:8000/state
 
 ---
 
-## 4. With Ollama (real models)
+## 4. Test with video file (instead of camera)
+
+1. Get a yawning/drowsy face video (MP4, AVI, MOV, WebM, MKV). See `backend/test_videos/README.md` for sources.
+2. Open the **Simulator** panel (right side).
+3. Click **Upload video** and select your file.
+4. The backend reads frames from the video instead of the camera (loops when done).
+5. Click **Clear** to switch back to live camera.
+
+---
+
+## 5. With Ollama (real models)
 
 1. Install and run [Ollama](https://ollama.com), then:
    ```bash
@@ -86,7 +96,7 @@ curl http://localhost:8000/state
 
 ---
 
-## 5. With a replay file (cockpit + phase)
+## 6. With a replay file (cockpit + phase)
 
 1. Create a JSON file, e.g. `backend/replay.json`:
    ```json
@@ -105,7 +115,7 @@ curl http://localhost:8000/state
 
 ---
 
-## 6. Quick test flow
+## 7. Quick test flow
 
 1. Start backend and frontend.
 2. Open http://localhost:5173 — confirm **Live** and PSI ring.
