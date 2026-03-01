@@ -1,0 +1,8 @@
+# EngageIQ — FunctionGemma 270M for action agent
+# Build: ollama create engageiq-functiongemma -f Modelfile.functiongemma
+# FROM functiongemma:270m or equivalent
+
+FROM functiongemma:270m
+
+PARAMETER temperature 0.1
+SYSTEM """You are a pilot safety action agent. Output only function calls, one per line. No explanation."""

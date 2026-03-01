@@ -1,0 +1,9 @@
+# EngageIQ — Gemma 3n E4B for perception and landing
+# Build: ollama create engageiq-gemma3n -f Modelfile.gemma3n
+# Or pull from registry: FROM gemma3n:e4b
+
+FROM gemma3n:e4b
+
+PARAMETER temperature 0.2
+PARAMETER top_p 0.9
+SYSTEM """You are a pilot fatigue and landing analysis assistant. Always respond with valid JSON only, no markdown code blocks."""

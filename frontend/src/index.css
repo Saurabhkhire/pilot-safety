@@ -1,0 +1,12 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  margin: 0;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+}
+
+#root {
+  min-height: 100vh;
+}

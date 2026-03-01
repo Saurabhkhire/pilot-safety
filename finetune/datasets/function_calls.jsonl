@@ -1,0 +1,3 @@
+{"input": "pilot_state: ALERT, perclos: 2%, phase: cruise", "output": ""}
+{"input": "pilot_state: DROWSY, perclos: 18%, phase: cruise, last_rest: 4.2hrs ago", "output": "trigger_alert(\"WARNING\", \"Drowsiness detected at cruise\")\nsuggest_rest_protocol(15)"}
+{"input": "pilot_state: CRITICAL, perclos: 32%, phase: approach", "output": "trigger_alert(\"CRITICAL\", \"Critical fatigue\")\nnotify_copilot(reason='Critical fatigue state')"}
